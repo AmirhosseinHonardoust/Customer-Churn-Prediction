@@ -20,3 +20,6 @@ outputs/*.txt
 .DS_Store
 .idea/
 .vscode/
+
+# Downloaded real dataset (fetch via data/fetch_telco.py)
+data/telco_churn.csv
