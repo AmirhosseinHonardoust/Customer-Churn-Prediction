@@ -1,0 +1,22 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated model artifacts (reproducible via src/train_models.py)
+outputs/*.png
+outputs/*.joblib
+outputs/*.json
+outputs/*.txt
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
