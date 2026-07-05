@@ -8,13 +8,17 @@ on:
 jobs:
   quality-gate:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install dev dependencies
@@ -31,5 +35,5 @@ jobs:
       - name: Mypy (type check)
         run: mypy src data
 
-      - name: Pytest
-        run: pytest
+      - name: Pytest (with coverage)
+        run: pytest --cov=src --cov=data --cov-report=term-missing

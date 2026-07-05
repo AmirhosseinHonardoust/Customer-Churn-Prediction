@@ -38,3 +38,42 @@ def test_split_stratification_roughly_preserved():
     _, _, _, y_train, y_val, y_test = split_xy(df, 0.2, 0.2, seed=13)
     for y in (y_train, y_val, y_test):
         assert abs(y.mean() - base) < 0.03
+
+
+def test_validate_schema_passes_on_generated_data():
+    from utils import validate_schema
+
+    df = generate(50, seed=1)
+    validate_schema(df, require_target=True)  # should not raise
+
+
+def test_validate_schema_is_dataset_agnostic():
+    # An arbitrary schema is fine as long as churn + >=1 feature exist.
+    import pandas as pd
+
+    from utils import validate_schema
+
+    df = pd.DataFrame({"customer_id": [1, 2], "some_feature": [0.1, 0.2], "churn": [0, 1]})
+    validate_schema(df, require_target=True)  # should not raise
+
+
+def test_validate_schema_raises_without_target():
+    import pytest
+
+    from utils import validate_schema
+
+    df = generate(50, seed=1).drop(columns=["churn"])
+    validate_schema(df, require_target=False)  # ok without target
+    with pytest.raises(ValueError, match="churn"):
+        validate_schema(df, require_target=True)
+
+
+def test_validate_schema_raises_when_no_features():
+    import pandas as pd
+    import pytest
+
+    from utils import validate_schema
+
+    df = pd.DataFrame({"customer_id": [1, 2], "churn": [0, 1]})
+    with pytest.raises(ValueError, match="no feature columns"):
+        validate_schema(df, require_target=True)
