@@ -1,9 +1,11 @@
-"""Train, select, and evaluate churn models, then write metrics and plots.
+"""Train, select, calibrate (optional), and evaluate churn models.
 
 Three model families (logistic regression, random forest, gradient boosting) are
 tuned with ``RandomizedSearchCV`` scored by average precision (PR-AUC). The best
-model is chosen on the validation PR-AUC, its decision threshold is tuned for F2
-with a precision floor, and it is finally evaluated on the held-out test set.
+model is chosen on validation PR-AUC, its decision threshold is tuned for F2 with
+a precision floor, and it is evaluated on a held-out test set. Metrics, a
+calibration (reliability) curve, and permutation feature importances are written
+to the output directory.
 """
 
 from __future__ import annotations
@@ -16,12 +18,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from joblib import dump
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     average_precision_score,
+    brier_score_loss,
     classification_report,
     confusion_matrix,
     precision_recall_curve,
@@ -32,7 +37,7 @@ from sklearn.model_selection import RandomizedSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from utils import load_dataset, split_xy
+from utils import load_dataset, positive_proba, split_xy, validate_schema
 
 SEED = 42
 
@@ -153,15 +158,6 @@ def pick_threshold(y_true, proba, beta: float = 2.0, min_precision: float = 0.55
     return best
 
 
-def positive_proba(pipe, X) -> np.ndarray:
-    """Return P(class=1) for ``X``, normalising decision scores when needed."""
-    clf = pipe.named_steps["clf"]
-    if hasattr(clf, "predict_proba"):
-        return pipe.predict_proba(X)[:, 1]
-    dec = pipe.decision_function(X)
-    return (dec - dec.min()) / (dec.max() - dec.min() + 1e-9)
-
-
 def plot_roc(y_true, proba, name, outpath) -> None:
     """Save an ROC curve to ``outpath``."""
     fpr, tpr, _ = roc_curve(y_true, proba)
@@ -203,31 +199,37 @@ def plot_confusion(y_true, y_pred, outpath) -> None:
     plt.close(fig)
 
 
-def plot_feature_importance(pipe, num_cols, cat_cols, outpath) -> None:
-    """Save a top-20 feature-importance bar chart for the fitted pipeline."""
-    ohe = pipe.named_steps["pre"].named_transformers_["cat"]
-    cat_names = (
-        list(ohe.get_feature_names_out(cat_cols)) if hasattr(ohe, "get_feature_names_out") else []
+def plot_calibration(y_true, proba, outpath, n_bins: int = 10) -> float:
+    """Save a reliability diagram and return the Brier score (lower is better)."""
+    frac_pos, mean_pred = calibration_curve(y_true, proba, n_bins=n_bins, strategy="quantile")
+    brier = float(brier_score_loss(y_true, proba))
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot([0, 1], [0, 1], "--", label="Perfectly calibrated")
+    ax.plot(mean_pred, frac_pos, marker="o", label=f"Model (Brier={brier:.3f})")
+    ax.set_xlabel("Mean predicted probability")
+    ax.set_ylabel("Fraction of positives")
+    ax.set_title("Calibration (Reliability) Curve")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=160)
+    plt.close(fig)
+    return brier
+
+
+def plot_feature_importance(pipe, X_val, y_val, outpath, seed: int = SEED) -> None:
+    """Save a permutation-importance bar chart (model-agnostic, comparable across features)."""
+    result = permutation_importance(
+        pipe, X_val, y_val, scoring="average_precision", n_repeats=10, random_state=seed
     )
-    feature_names = list(num_cols) + cat_names
-
-    clf = pipe.named_steps["clf"]
-    if hasattr(clf, "feature_importances_"):
-        importances = clf.feature_importances_
-    elif hasattr(clf, "coef_"):
-        importances = np.abs(clf.coef_).ravel()
-    else:
-        importances = np.zeros(len(feature_names))
-
-    idx = np.argsort(importances)[-20:]
-    imp = importances[idx]
-    names = np.array(feature_names)[idx]
+    importances = result.importances_mean
+    feature_names = np.array(list(X_val.columns))
+    order = np.argsort(importances)[-20:]
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.barh(range(len(imp)), imp)
-    ax.set_yticks(range(len(imp)))
-    ax.set_yticklabels(names)
-    ax.set_title("Top Feature Importances")
+    ax.barh(range(len(order)), importances[order])
+    ax.set_yticks(range(len(order)))
+    ax.set_yticklabels(feature_names[order])
+    ax.set_title("Permutation Feature Importance (drop in PR-AUC)")
     ax.set_xlabel("Importance")
     fig.tight_layout()
     fig.savefig(outpath, dpi=160)
@@ -247,6 +249,22 @@ def select_best_model(X_train, y_train, pre, seed: int):
     return best_pipe, best_name, best_params, best_val_ap
 
 
+def calibrate_model(best_pipe, X_val, y_val):
+    """Return a probability-calibrated wrapper around the (prefit) best pipeline.
+
+    Uses ``FrozenEstimator`` on scikit-learn >= 1.6 and falls back to the
+    ``cv="prefit"`` API on older versions.
+    """
+    try:
+        from sklearn.frozen import FrozenEstimator
+
+        calibrated = CalibratedClassifierCV(FrozenEstimator(best_pipe), method="isotonic")
+    except ImportError:
+        calibrated = CalibratedClassifierCV(best_pipe, method="isotonic", cv="prefit")
+    calibrated.fit(X_val, y_val)
+    return calibrated
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     """Parse command-line arguments."""
     ap = argparse.ArgumentParser()
@@ -255,37 +273,50 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--test-size", type=float, default=0.2)
     ap.add_argument("--val-size", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="Isotonic-calibrate the selected model on the validation set before evaluation.",
+    )
     return ap.parse_args(argv)
 
 
 def main(argv=None) -> None:
-    """Run the full train/select/tune/evaluate pipeline and write outputs."""
+    """Run the full train/select/(calibrate)/tune/evaluate pipeline and write outputs."""
     args = parse_args(argv)
     ensure_outdir(args.outdir)
 
     df = load_dataset(args.input)
+    validate_schema(df, require_target=True)
     X_train, X_val, X_test, y_train, y_val, y_test = split_xy(
         df, args.test_size, args.val_size, args.seed
     )
 
-    pre, num_cols, cat_cols = build_preprocessor(X_train)
+    pre, _num_cols, _cat_cols = build_preprocessor(X_train)
     best_pipe, best_name, best_params, best_val_ap = select_best_model(
         X_train, y_train, pre, args.seed
     )
 
+    final_model = best_pipe
+    if args.calibrate:
+        final_model = calibrate_model(best_pipe, X_val, y_val)
+
     # Tune threshold on validation set, then evaluate on test.
-    proba_val = positive_proba(best_pipe, X_val)
+    proba_val = positive_proba(final_model, X_val)
     thr_info = pick_threshold(y_val.values, proba_val, beta=2.0, min_precision=0.55)
 
-    proba_test = positive_proba(best_pipe, X_test)
+    proba_test = positive_proba(final_model, X_test)
     y_pred_test = (proba_test >= thr_info["thr"]).astype(int)
 
     auc = roc_auc_score(y_test, proba_test)
     ap_score = average_precision_score(y_test, proba_test)
     report = classification_report(y_test, y_pred_test, digits=3, zero_division=0)
 
+    brier = plot_calibration(y_test, proba_test, os.path.join(args.outdir, "calibration_curve.png"))
+
     with open(os.path.join(args.outdir, "classification_report.txt"), "w") as f:
         f.write(f"Best model: {best_name}\n")
+        f.write(f"Calibrated: {args.calibrate}\n")
         f.write(f"Best params: {best_params}\n")
         f.write(f"Tuned threshold: {thr_info}\n\n")
         f.write(report)
@@ -295,11 +326,16 @@ def main(argv=None) -> None:
             {
                 "selection": {
                     "best_model": best_name,
+                    "calibrated": args.calibrate,
                     "best_params": best_params,
                     "val_pr_auc": best_val_ap,
                     "threshold": thr_info,
                 },
-                "test_metrics": {"roc_auc": float(auc), "average_precision": float(ap_score)},
+                "test_metrics": {
+                    "roc_auc": float(auc),
+                    "average_precision": float(ap_score),
+                    "brier_score": brier,
+                },
             },
             f,
             indent=2,
@@ -309,15 +345,15 @@ def main(argv=None) -> None:
     plot_pr(y_test, proba_test, best_name, os.path.join(args.outdir, "pr_curve.png"))
     plot_confusion(y_test, y_pred_test, os.path.join(args.outdir, "confusion_matrix.png"))
     plot_feature_importance(
-        best_pipe, num_cols, cat_cols, os.path.join(args.outdir, "feature_importance.png")
+        final_model, X_val, y_val, os.path.join(args.outdir, "feature_importance.png"), args.seed
     )
 
-    dump(best_pipe, os.path.join(args.outdir, "best_model.joblib"))
+    dump(final_model, os.path.join(args.outdir, "best_model.joblib"))
 
     print("[OK] Training complete.")
-    print(f"Best model: {best_name}")
+    print(f"Best model: {best_name} (calibrated={args.calibrate})")
     print(f"Threshold: {thr_info}")
-    print(f"Test ROC-AUC={auc:.3f}, PR-AUC(AP)={ap_score:.3f}")
+    print(f"Test ROC-AUC={auc:.3f}, PR-AUC(AP)={ap_score:.3f}, Brier={brier:.3f}")
     print(f"Outputs saved to: {args.outdir}")
 
 
