@@ -167,6 +167,9 @@ Customer-Churn-Prediction/
 │
 ├── outputs/            (generated; git-ignored)
 │
+├── reports/
+│   └── figures/        (versioned snapshots shown in the README)
+│
 ├── .gitignore
 ├── README.md
 ├── MODEL_CARD.md
@@ -299,6 +302,14 @@ python src/predict.py \
 
 Output columns: `customer_id` (if present), `churn_proba`, `churn_pred`.
 
+> **`new_customers.csv` is a placeholder** — supply your own file, or create a quick one from existing data:
+>
+> ```bash
+> python -c "import pandas as pd; pd.read_csv('data/customers.csv').head(20).to_csv('new_customers.csv', index=False)"
+> ```
+>
+> **The input columns must match the schema the model was trained on.** A model trained on the synthetic data (`age`, `region`, `tenure_months`, ...) cannot score a Telco file (`gender`, `tenure`, `MonthlyCharges`, ...) and vice versa — retrain on the matching dataset first if the columns differ.
+
 ---
 
 ## Data Schema
@@ -382,29 +393,44 @@ Example results on **real IBM Telco** data (Gradient Boosting, seed 42):
 
 ## Visual Reports
 
+The figures below are from the **IBM Telco** run (Gradient Boosting, seed 42, threshold 0.29) and are stored in `reports/figures/`.
+
 ### Model evaluation charts
 
 <div align="center">
 
 | ROC Curve | Precision-Recall Curve |
 |---|---|
-| <img width="480" alt="roc_curve" src="https://github.com/user-attachments/assets/8af72b6f-d62e-4f5d-b9d3-e5b502a35f3b" /> | <img width="480" alt="pr_curve" src="https://github.com/user-attachments/assets/24b4145e-2a46-45e6-8ecb-499cb5a2c808" /> |
-| **Analysis:** The ROC curve shows ranking quality across thresholds. It complements PR-AUC but can look optimistic when churners are a small minority. | **Analysis:** The precision-recall curve focuses on the churn class and is the primary selection metric, since catching churners matters more than overall accuracy. |
+| <img width="1280" height="960" alt="roc_curve" src="https://github.com/user-attachments/assets/861568e1-3eb4-45d0-aa1f-8b0f51640dc1" /> | <img width="1280" height="960" alt="pr_curve" src="https://github.com/user-attachments/assets/b0b2efd3-3e68-4d57-b520-04a9ed55a1cf" /> |
+| **Analysis:** The model reaches ROC-AUC 0.847 and climbs steeply at low false-positive rates, so the highest-risk customers are ranked well above the rest. | **Analysis:** With churners ~27% of the data, PR-AUC (AP 0.666) is the primary selection metric; precision stays around 0.75-0.85 through the first third of recall before trading off. |
 
 </div>
 
-### Model interpretation
+### Probability quality and decisions
 
 <div align="center">
 
-| Feature Importance | Confusion Matrix |
+| Calibration Curve | Confusion Matrix |
 |---|---|
-| <img width="480" alt="feature_importance" src="https://github.com/user-attachments/assets/d14697b0-af85-40eb-a9d0-01078996f0d8" /> | <img width="480" alt="confusion_matrix" src="https://github.com/user-attachments/assets/f9d57d15-ea26-4c95-90a7-5d5d8f9db584" /> |
-| **Analysis:** Permutation importance measures each feature's contribution model-agnostically, so numeric and categorical signals are comparable on one axis. | **Analysis:** The confusion matrix gives a compact view of correct and incorrect predictions at the tuned decision threshold. |
+| <img width="1280" height="960" alt="calibration_curve" src="https://github.com/user-attachments/assets/3685feb5-846a-42da-a217-0a67e3eb4457" /> | <img width="1120" height="1120" alt="confusion_matrix" src="https://github.com/user-attachments/assets/6e0e690a-8b84-4b3a-bc86-47e5e4b5dcda" /> |
+| **Analysis:** Predicted probabilities track the diagonal closely (Brier 0.135), so a score of 0.6 means roughly a 60% observed churn rate — the scores are usable as probabilities, not just rankings. | **Analysis:** At the F2-tuned threshold the model catches 289 of 374 churners (recall ~0.77) while flagging 259 non-churners — the deliberate recall-leaning trade-off for retention outreach. |
 
 </div>
 
-> Figures are regenerated on every run and written to `outputs/`; a calibration (reliability) diagram is also produced when evaluating probability quality.
+<details>
+<summary>Feature importance</summary>
+        
+### Feature importance
+
+<div align="center">
+
+<img width="1600" height="960" alt="feature_importance" src="https://github.com/user-attachments/assets/a084f599-be22-49e0-9976-08de6e17a97c" />
+
+</div>
+
+> **Analysis:** Permutation importance (drop in PR-AUC) makes numeric and categorical signals comparable on one axis. `tenure`, `Contract`, and `InternetService` dominate, matching the intuition that newer, month-to-month customers churn most. All figures are regenerated on every run into `outputs/`; the copies in `reports/figures/` are the versioned snapshots shown here.
+
+</details>
 
 ---
 
