@@ -9,7 +9,7 @@
 [![CI](https://github.com/AmirhosseinHonardoust/Customer-Churn-Prediction/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AmirhosseinHonardoust/Customer-Churn-Prediction/actions/workflows/ci.yml)
 
 </div>
-
+ 
 A production-minded customer-churn workflow for turning behavioural signals into **calibrated churn probabilities**, **PR-AUC model selection**, **recall-focused threshold tuning**, **interpretable importances**, and **batch churn scoring**.
 
 > **Important:** This project is a **portfolio and research demo**, not a production churn or customer-retention decision system.
